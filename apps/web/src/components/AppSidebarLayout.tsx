@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import * as Schema from "effect/Schema";
 import {
   useEffect,
@@ -30,7 +31,8 @@ import { isModelPickerOpen } from "../modelPickerVisibility";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { cn, isMacPlatform } from "../lib/utils";
-import { primaryServerKeybindingsAtom } from "../state/server";
+import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
+import { readPrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import {
   PanelAnimationSuppressionProvider,
@@ -304,6 +306,14 @@ function registerAppShellCommands(router: AnyRouter, shellElement: Element): () 
     registerMenuAction("open-settings", () => {
       if (!/^\/settings(\/|$)/.test(router.state.location.pathname))
         void router.navigate({ to: "/settings" });
+    }),
+    registerMenuAction("accounts-switched", () => {
+      const environmentId = readPrimaryEnvironmentId();
+      if (environmentId === null) return;
+      void runAtomCommand(appAtomRegistry, serverEnvironment.refreshProviders, {
+        environmentId,
+        input: {},
+      });
     }),
   ];
   return () => {
