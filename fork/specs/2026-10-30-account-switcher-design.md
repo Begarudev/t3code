@@ -100,3 +100,27 @@ for the local environment, so provider account and usage displays update immedia
 - Live: `vp run dev:desktop` with `CLAUDE_SWITCH_*` pointing at scratch data; screenshot the menu.
 - One real Codex and Claude switch with Garud present, then switch back.
 - Build/install with `fork/update.sh --no-sync`; rollback per `fork/README.md`.
+
+## Real-account test results and follow-up (30 Oct 2026, approved in chat)
+
+- Installed as `T3 Code (Beta).app` (upstream renamed the app; same bundle id and `~/.t3/userdata`). The old
+  `T3 Code (Alpha).app` is in `release/previous/` for rollback.
+- Codex switching failed for every saved account: `security -w` prints values with newlines as hex. Fixed in
+  claude-switch 56ca8ef.
+- Claude: running processes pick up a switch on their own (they re-read the Keychain). Switching to a dead
+  login therefore logs every running session out, which happened with the Arcco account (now removed).
+- Codex: nothing running picks up a switch. The terminal `codex` talks to a shared app-server daemon that
+  keeps the login in memory, and T3 runs its own app-server processes.
+
+Follow-up, chosen by Garud:
+
+- After a Codex switch, restart Codex's daemon (CLI, `codex app-server daemon restart`). A Codex turn running
+  in the terminal at that moment may be cut off.
+- T3's own Codex sessions are not released early. T3 already drops a provider session after 30 min idle
+  (`DEFAULT_IDLE_TIMEOUT_MS` in `ProviderSessionManager.ts`), so only threads used in the last half hour keep
+  the old login, until they go idle or T3 restarts. Releasing them sooner needs a new guarded RPC across
+  contracts, server and client (`releaseUnlessBusy`), which is too much upstream surface for this fork.
+- New `cli.mjs usage --json`: live per-account limits (5 h and weekly, percent left), 5-minute cache. Dead
+  logins show as "login expired". Refreshes tokens of inactive accounts only, under a shared lock file;
+  never refreshes the active login.
+- Menu labels: `Name (Plan) — 5h 70% · wk 88% left`, or `Name (Plan) — login expired`.

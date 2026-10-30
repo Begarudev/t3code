@@ -6,6 +6,8 @@ import * as NodeChildProcess from "node:child_process";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
+import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
 
 vi.mock("node:fs", { spy: true });
@@ -15,6 +17,10 @@ import type * as Electron from "electron";
 
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as ElectronDialog from "../electron/ElectronDialog.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as DesktopWindow from "./DesktopWindow.ts";
 import { buildAccountsMenu, decodeCliOutput, make } from "./DesktopAccountsMenu.ts";
 
 const accounts = {
@@ -48,6 +54,229 @@ function submenu(item: Electron.MenuItemConstructorOptions | undefined) {
 }
 
 describe("DesktopAccountsMenu", () => {
+  it.effect("adds only known usage windows and expired logins to profile labels", () =>
+    Effect.gen(function* () {
+      const fetchedAt = "2026-10-30T10:00:00Z";
+      for (const [value, suffix] of [
+        [
+          {
+            status: "ok",
+            windows: [
+              { kind: "session", leftPercent: 70 },
+              { kind: "weekly", leftPercent: 88, resetsAt: fetchedAt },
+            ],
+          },
+          " — 5h 70% · wk 88% left",
+        ],
+        [
+          {
+            status: "ok",
+            windows: [{ kind: "weekly", leftPercent: 0 }],
+          },
+          " — wk 0% left",
+        ],
+        [
+          {
+            status: "ok",
+            windows: [{ kind: "session", leftPercent: 100 }],
+          },
+          " — 5h 100% left",
+        ],
+        [{ status: "expired" }, " — login expired"],
+        [{ status: "unavailable", message: "offline" }, ""],
+        [{ status: "future" }, ""],
+        [{ status: "ok", windows: [] }, ""],
+        [
+          {
+            status: "ok",
+            windows: [
+              { kind: "monthly", leftPercent: 40 },
+              { kind: "session", leftPercent: 23 },
+            ],
+          },
+          " — 5h 23% left",
+        ],
+        [
+          {
+            status: "ok",
+            windows: [
+              { kind: "session", leftPercent: 101 },
+              { kind: "weekly", leftPercent: -1 },
+              { kind: "session", leftPercent: 1.5 },
+            ],
+          },
+          "",
+        ],
+      ] as const) {
+        const usage = yield* decodeCliOutput(
+          "usage",
+          JSON.stringify({
+            ok: true,
+            claude: { personal: { ...value, fetchedAt } },
+            codex: { error: "offline" },
+          }),
+        );
+        const claude = submenu(submenu(buildAccountsMenu(accounts, () => {}, usage))[0]);
+        assert.equal(claude[0]?.label, `Personal (Max)${suffix}`);
+        assert.equal(claude[0]?.type, "checkbox");
+        assert.isTrue(claude[0]?.checked);
+        assert.equal(claude[1]?.label, "Work");
+      }
+      const usage = yield* decodeCliOutput(
+        "usage",
+        JSON.stringify({
+          ok: true,
+          claude: { error: "offline" },
+          codex: { personal: { status: "expired", fetchedAt } },
+        }),
+      );
+      const list = { ...accounts, codex: accounts.claude };
+      const providers = submenu(buildAccountsMenu(list, () => {}, usage));
+      assert.equal(submenu(providers[0])[0]?.label, "Personal (Max)");
+      assert.equal(submenu(providers[1])[0]?.label, "Personal (Max) — login expired");
+    }),
+  );
+
+  it.effect("refreshes usage independently, coalesces requests and hides failures", () =>
+    Effect.gen(function* () {
+      using _exists = vi.spyOn(NodeFS, "existsSync").mockReturnValue(true);
+      type UsageReply = (stdout: string, error?: NodeChildProcess.ExecFileException) => void;
+      const pending = yield* Queue.make<UsageReply>();
+      const rebuilt = yield* Queue.make<Electron.MenuItemConstructorOptions | undefined>();
+      const mainWindow = {} as Electron.BrowserWindow;
+      let focus = () => {};
+      let list = accounts;
+      let activeUsage = 0;
+      let usageCalls = 0;
+      using execute = vi
+        .spyOn(NodeChildProcess, "execFile")
+        .mockImplementation((_file, args, options, callback) => {
+          const command = args?.[1];
+          if (command === "usage") {
+            assert.equal(options?.timeout, 20_000);
+            activeUsage++;
+            usageCalls++;
+            assert.equal(activeUsage, 1);
+            Queue.offerUnsafe(pending, (stdout, error) => {
+              activeUsage--;
+              callback?.(error ?? null, stdout, "");
+            });
+          } else if (command === "list") {
+            callback?.(null, JSON.stringify(list), "");
+          } else if (command === "switch") {
+            list = { ...accounts, claude: { ...accounts.claude, activeId: "work" } };
+            callback?.(
+              null,
+              JSON.stringify({
+                ok: true,
+                provider: "claude",
+                profile: { id: "work", name: "Work" },
+                alreadyActive: true,
+              }),
+              "",
+            );
+          } else {
+            assert.fail(`Unexpected CLI command: ${command}`);
+          }
+          return new NodeChildProcess.ChildProcess();
+        });
+      const menu = yield* make;
+      const rebuild = Effect.gen(function* () {
+        yield* Queue.offer(rebuilt, yield* menu.template);
+      });
+      yield* menu.watch(rebuild).pipe(
+        Effect.provideService(ElectronApp.ElectronApp, {
+          ...ElectronApp.make,
+          on: (_event, listener) =>
+            Effect.sync(() => {
+              focus = () => Reflect.apply(listener, undefined, [{}, mainWindow]);
+            }),
+        }),
+        Effect.provideService(ElectronWindow.ElectronWindow, {
+          create: () => Effect.die("unexpected create"),
+          main: Effect.succeedSome(mainWindow),
+          currentMainOrFirst: Effect.succeedNone,
+          focusedMainOrFirst: Effect.succeedNone,
+          setMain: () => Effect.void,
+          clearMain: () => Effect.void,
+          prepareReveal: () => Effect.succeed(false),
+          reveal: () => Effect.void,
+          sendAll: () => Effect.void,
+          destroyAll: Effect.void,
+          syncAllAppearance: () => Effect.void,
+        }),
+        Effect.provideService(ElectronDialog.ElectronDialog, {
+          ...ElectronDialog.make,
+          showErrorBox: () => Effect.die("usage must never open a dialog"),
+        }),
+        Effect.provideService(DesktopWindow.DesktopWindow, {
+          createMain: Effect.die("unexpected createMain"),
+          ensureMain: Effect.die("unexpected ensureMain"),
+          revealOrCreateMain: Effect.die("unexpected revealOrCreateMain"),
+          activate: Effect.void,
+          createMainIfBackendReady: Effect.void,
+          showConnectingSplash: Effect.void,
+          handleBackendReady: () => Effect.void,
+          handleBackendNotReady: Effect.void,
+          flushMainWindowBounds: Effect.void,
+          prepareCaptureReveal: Effect.void,
+          dispatchMenuAction: () => Effect.void,
+          dispatchSnapShotEvent: () => Effect.void,
+          zoomMain: () => Effect.void,
+          runMainContentsCommand: () => Effect.void,
+          syncAppearance: Effect.void,
+        }),
+      );
+      const initial = yield* menu.template;
+      assert.equal(submenu(submenu(initial)[0])[0]?.label, "Personal (Max)");
+      const first = yield* Queue.take(pending);
+      submenu(submenu(initial)[0])[1]?.click?.(
+        {} as Electron.MenuItem,
+        undefined,
+        {} as Electron.KeyboardEvent,
+      );
+      const switched = yield* Queue.take(rebuilt);
+      assert.isTrue(submenu(submenu(switched)[0])[1]?.checked);
+      assert.equal(activeUsage, 1);
+      // The focus refresh and switch must request one follow-up, even while usage is pending.
+      focus();
+      yield* TestClock.adjust("2 seconds");
+      assert.equal(usageCalls, 1);
+      const usage = {
+        ok: true,
+        claude: {
+          personal: {
+            status: "ok",
+            fetchedAt: "2026-10-30T10:00:00Z",
+            windows: [{ kind: "session", leftPercent: 70 }],
+          },
+        },
+        codex: {},
+      };
+      first(JSON.stringify(usage));
+      const updated = yield* Queue.take(rebuilt);
+      assert.equal(submenu(submenu(updated)[0])[0]?.label, "Personal (Max) — 5h 70% left");
+      const second = yield* Queue.take(pending);
+      assert.equal(usageCalls, 2);
+      second(
+        JSON.stringify({
+          ...usage,
+          claude: {
+            personal: { ...usage.claude.personal, fetchedAt: "2026-10-30T10:01:00Z" },
+          },
+        }),
+      );
+      focus();
+      yield* TestClock.adjust("2 seconds");
+      const third = yield* Queue.take(pending);
+      assert.equal(yield* Queue.size(rebuilt), 0);
+      third("", { killed: true } as NodeChildProcess.ExecFileException);
+      const failed = yield* Queue.take(rebuilt);
+      assert.equal(submenu(submenu(failed)[0])[0]?.label, "Personal (Max)");
+      assert.equal(execute.mock.calls.filter((call) => call[1]?.[1] === "usage").length, 3);
+    }).pipe(Effect.scoped, Effect.provide(layerEnvironment)),
+  );
+
   it.effect("decodes profiles into labelled checkboxes and an unsaved login into Save", () =>
     Effect.gen(function* () {
       const list = yield* decodeCliOutput("list", JSON.stringify(accounts));
@@ -167,7 +396,7 @@ describe("DesktopAccountsMenu", () => {
       }
       const saved = { ok: true, provider: "claude", profile, updated: false } as const;
       assert.deepEqual(yield* decodeCliOutput("save", JSON.stringify(saved)), saved);
-      for (const command of ["list", "switch", "save"] as const) {
+      for (const command of ["list", "switch", "save", "usage"] as const) {
         for (const exitCode of [0, 1]) {
           const error = yield* decodeCliOutput(
             command,
@@ -210,6 +439,9 @@ describe("DesktopAccountsMenu", () => {
         ],
         ["list", JSON.stringify(accounts), 1, "exited with code 1"],
         ["list", '{"ok":true}\n{}', 0, "invalid JSON"],
+        ["usage", "not JSON", 0, "invalid JSON"],
+        ["usage", '{"ok":true,"claude":{}}', 0, "invalid usage response"],
+        ["usage", '{"ok":true,"claude":{},"codex":{}}', 1, "exited with code 1"],
       ] as const) {
         const error = yield* decodeCliOutput(command, stdout, exitCode).pipe(Effect.flip);
         assert.include(error.message, message);
