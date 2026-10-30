@@ -9,6 +9,7 @@ import type * as Electron from "electron";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
+import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopApplicationMenu from "./DesktopApplicationMenu.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
@@ -56,6 +57,20 @@ const layerElectronDialog = Layer.succeed(ElectronDialog.ElectronDialog, {
   showMessageBox: () => Effect.succeed({ response: 0, checkboxChecked: false }),
   showErrorBox: () => Effect.void,
 } satisfies ElectronDialog.ElectronDialog["Service"]);
+
+const layerElectronWindow = Layer.succeed(ElectronWindow.ElectronWindow, {
+  create: () => Effect.die("unexpected create"),
+  main: Effect.succeedNone,
+  currentMainOrFirst: Effect.succeedNone,
+  focusedMainOrFirst: Effect.succeedNone,
+  setMain: () => Effect.void,
+  clearMain: () => Effect.void,
+  prepareReveal: () => Effect.succeed(false),
+  reveal: () => Effect.void,
+  sendAll: () => Effect.void,
+  destroyAll: Effect.void,
+  syncAllAppearance: () => Effect.void,
+} satisfies ElectronWindow.ElectronWindow["Service"]);
 
 const layerDesktopUpdates = Layer.succeed(DesktopUpdates.DesktopUpdates, {
   getState: Effect.die("unexpected getState"),
@@ -118,6 +133,7 @@ const configureMenu = (
         Layer.provideMerge(layerDesktopWindow(selectedAction)),
         Layer.provideMerge(layerDesktopUpdates),
         Layer.provideMerge(layerElectronDialog),
+        Layer.provideMerge(layerElectronWindow),
         Layer.provideMerge(layerElectronApp),
         Layer.provideMerge(
           DesktopEnvironment.layer({ ...environmentInput, ...environment }).pipe(

@@ -12,6 +12,7 @@ import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
+import * as DesktopAccountsMenu from "./DesktopAccountsMenu.ts";
 
 export class DesktopApplicationMenuActionError extends Schema.TaggedError<DesktopApplicationMenuActionError>()(
   "DesktopApplicationMenuActionError",
@@ -118,6 +119,7 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const context = yield* Effect.context<DesktopApplicationMenuRuntimeServices>();
   const runPromise = Effect.runPromiseWith(context);
+  const accounts = yield* DesktopAccountsMenu.make;
 
   const runMenuEffect = <E>(
     action: string,
@@ -136,6 +138,7 @@ export const make = Effect.gen(function* () {
   };
 
   const configure = Effect.gen(function* () {
+    const accountsTemplate = yield* accounts.template;
     const checkForUpdatesClick = () => {
       runMenuEffect("check-for-updates", handleCheckForUpdatesMenuClick);
     };
@@ -292,6 +295,7 @@ export const make = Effect.gen(function* () {
           { role: "togglefullscreen" },
         ],
       },
+      ...(accountsTemplate ? [accountsTemplate] : []),
       {
         // Electron's default Window submenu adds a Ctrl+W close role off macOS.
         role: "windowMenu",
@@ -316,6 +320,8 @@ export const make = Effect.gen(function* () {
 
     yield* electronMenu.setApplicationMenu(template);
   }).pipe(Effect.withSpan("desktop.menu.configure"));
+
+  yield* accounts.watch(configure);
 
   return DesktopApplicationMenu.of({
     configure,
