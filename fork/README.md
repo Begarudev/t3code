@@ -34,7 +34,7 @@ conflict resolved once is replayed automatically next time.
 Each install moves the replaced app to `release/previous/`. Quit T3 Code, then:
 
 ```sh
-rm -rf "/Applications/T3 Code (Alpha).app" && mv "release/previous/T3 Code (Alpha).app" /Applications/
+rm -rf "/Applications/T3 Code (Beta).app" && mv "release/previous/T3 Code (Beta).app" /Applications/
 ```
 
 To go back to the official app instead: `brew install --cask --force t3-code`.
